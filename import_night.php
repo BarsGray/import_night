@@ -1,4 +1,66 @@
 
+
+// Создаём родителя
+$product = new WC_Product_Variable();
+$product->set_name('Футболка Пример');
+$product->set_sku('shirt001');
+$product->set_status('publish');
+$product_id = $product->save();
+
+// Создаём глобальный атрибут цвета, если его нет
+$taxonomy = 'pa_color';
+if (!taxonomy_exists($taxonomy)) {
+	$attribute_id = wc_create_attribute([
+		'name' => 'Color',
+		'slug' => 'color',
+		'type' => 'select',
+		'order_by' => 'menu_order',
+		'has_archives' => false,
+	]);
+	register_taxonomy($taxonomy, 'product', ['hierarchical' => true]);
+}
+
+// Создаём термины для атрибута
+if (!term_exists('Red', $taxonomy))
+	wp_insert_term('Red', $taxonomy, ['slug' => 'red']);
+if (!term_exists('Blue', $taxonomy))
+	wp_insert_term('Blue', $taxonomy, ['slug' => 'blue']);
+
+// Привязываем атрибут к родительскому продукту через WC_Product_Attribute
+$attr = new WC_Product_Attribute();
+$attr->set_id(wc_attribute_taxonomy_id_by_name('color')); // ID глобального атрибута
+$attr->set_name($taxonomy);
+$attr->set_options(['red', 'blue']); // Слаг термина!
+$attr->set_position(0);
+$attr->set_visible(true);
+$attr->set_variation(true);
+
+$product->set_attributes([$attr]);
+$product->save();
+
+// Создаём вариацию Red
+$variation = new WC_Product_Variation();
+$variation->set_parent_id($product_id);
+$variation->set_sku('shirt001-red');
+$variation->set_regular_price(1000);
+$variation->set_attributes([
+	$taxonomy => 'red', // slug
+]);
+$variation->save();
+
+// Создаём вариацию Blue
+$variation2 = new WC_Product_Variation();
+$variation2->set_parent_id($product_id);
+$variation2->set_sku('shirt001-blue');
+$variation2->set_regular_price(1100);
+$variation2->set_attributes([
+	$taxonomy => 'blue',
+]);
+$variation2->save();
+
+echo "Готово!";
+
+
 // ============================================================================================================================
 // import_night
 // ============================================================================================================================
