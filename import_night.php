@@ -95,7 +95,6 @@ function creat_product()
 			$product->set_status('publish');
 			$product_id = $product->save();
 
-			echo "Создан товар: $name\n";
 		}
 	}
 }
