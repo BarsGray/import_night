@@ -61,6 +61,7 @@ $variation2->save();
 echo "Готово!";
 
 
+
 // ============================================================================================================================
 // import_night
 // ============================================================================================================================
@@ -106,6 +107,77 @@ function translit($text)
 	$text = preg_replace('/[^a-z0-9]+/', '-', $text);
 	return trim($text, '-');
 }
+
+
+
+
+function categories()
+{
+
+	function import_categories($xml)
+	{
+		if (!isset($xml->Классификатор->Группы))
+			return;
+		parse_groups($xml->Классификатор->Группы);
+	}
+
+	function parse_groups($groups, $parent = 0)
+	{
+		foreach ($groups->Группа as $group) {
+
+			$id = (string) $group->Ид;
+			$name = (string) $group->Наименование;
+
+			// пропускаем удалённые
+			if ((string) $group->ПометкаУдаления === 'true') {
+				continue;
+			}
+
+			$slug = translit($name);
+
+			// ищем по 1С ID
+			$existing = get_terms([
+				'taxonomy' => 'product_cat',
+				'hide_empty' => false,
+				'meta_query' => [
+					[
+						'key' => '1c_id',
+						'value' => $id
+					]
+				]
+			]);
+
+			if (!empty($existing)) {
+				$term_id = $existing[0]->term_id;
+			} else {
+				$result = wp_insert_term($name, 'product_cat', [
+					'slug' => $slug,
+					'parent' => $parent
+				]);
+
+				if (is_wp_error($result))
+					continue;
+
+				$term_id = $result['term_id'];
+
+				// сохраняем связь с 1С
+				update_term_meta($term_id, '1c_id', $id);
+			}
+
+			// рекурсия
+			if (isset($group->Группы)) {
+				parse_groups($group->Группы, $term_id);
+			}
+		}
+	}
+
+	$xml_file = __DIR__ . '/import___86e209bc-0e98-470e-948a-0e59edce081d.xml';
+	$xml = simplexml_load_file($xml_file);
+
+	import_categories($xml);
+}
+
+
 
 
 
@@ -157,6 +229,33 @@ function creat_product()
 			$product->set_status('publish');
 			$product_id = $product->save();
 
+			$category_ids = [];
+
+			if (isset($item->Группы)) {
+				foreach ($item->Группы->Ид as $group_id) {
+
+					$group_id = (string) $group_id;
+
+					$terms = get_terms([
+						'taxonomy' => 'product_cat',
+						'hide_empty' => false,
+						'meta_query' => [
+							[
+								'key' => '1c_id',
+								'value' => $group_id
+							]
+						]
+					]);
+
+					if (!empty($terms)) {
+						$category_ids[] = $terms[0]->term_id;
+					}
+				}
+			}
+
+			if (!empty($category_ids)) {
+				wp_set_object_terms($product_id, $category_ids, 'product_cat');
+			}
 		}
 	}
 }
@@ -210,6 +309,44 @@ function add_attrebut_on_product()
 	$offers_file = __DIR__ . '/offers__8ee528fc-aee1-4912-9105-6ccf7f67d014.xml';
 	$offers = simplexml_load_file($offers_file);
 
+	
+	
+	$att = [];
+	
+	foreach ($offers->ПакетПредложений->Предложения->Предложение as $offer) {
+
+		$full_id = (string) $offer->Ид;
+		$parts = explode('#', $full_id);
+
+		if (count($parts) < 2)
+			continue;
+
+		$product_sku = $parts[0];
+
+		$product_id = wc_get_product_id_by_sku($product_sku);
+		if (!$product_id)
+			continue;
+
+		$product = wc_get_product($product_id);
+
+		$att_term = [];
+
+		foreach ($offer->ХарактеристикиТовара->ХарактеристикаТовара as $attr) {
+			// $name = ((string) $attr->Наименование);
+			$name = trim((string) $attr->Наименование, "_ ");
+			$value = ((string) $attr->Значение);
+
+			if (!$value)
+				continue;
+
+			$taxonomy = 'pa_' . translit($name);
+
+			$term = get_term_by('name', $value, $taxonomy);
+
+			$att[$product_sku][$taxonomy][] = $term->name;
+		}
+	}
+
 	foreach ($offers->ПакетПредложений->Предложения->Предложение as $offer) {
 
 		$full_id = (string) $offer->Ид;
@@ -243,7 +380,7 @@ function add_attrebut_on_product()
 			$attrr = new WC_Product_Attribute();
 			$attrr->set_id(wc_attribute_taxonomy_id_by_name($taxonomy));
 			$attrr->set_name($taxonomy);
-			$attrr->set_options([$term->name]);
+			$attrr->set_options(array_unique($att[$product_sku][$taxonomy]));
 			$attrr->set_visible(true);
 			$attrr->set_variation(true);
 
@@ -296,6 +433,8 @@ function creat_variation()
 
 
 		$attributes = [];
+		$parent_product = wc_get_product($product_id);
+		$parent_attributes = $parent_product->get_attributes();
 
 		foreach ($offer->ХарактеристикиТовара->ХарактеристикаТовара as $attr) {
 
@@ -310,20 +449,31 @@ function creat_variation()
 
 			$term = get_term_by('slug', translit($value), $taxonomy);
 
-			// echo '<pre>';
-			// print_r($term);
-			// echo '</pre>';
-
 			$attributes[$taxonomy] = $term->slug;
-		}
 
-		echo '<pre>';
-		// print_r($attributes);
-		// print_r($variation);
-		echo '</pre>';
+			// добавляем термин к родителю, если его нет
+			if (!isset($parent_attributes[$taxonomy])) {
+				$pa = new WC_Product_Attribute();
+				$pa->set_name($taxonomy);
+				$pa->set_options([$term->slug]);
+				$pa->set_visible(true);
+				$pa->set_variation(true);
+				$parent_attributes[$taxonomy] = $pa;
+			} else {
+				$existing_options = $parent_attributes[$taxonomy]->get_options();
+				if (!in_array($term->slug, $existing_options)) {
+					$existing_options[] = $term->slug;
+					$parent_attributes[$taxonomy]->set_options($existing_options);
+				}
+			}
+		}
 
 		$variation->set_attributes($attributes);
 		$variation->save();
+
+		// сохраняем обновленные атрибуты родителя
+		$parent_product->set_attributes($parent_attributes);
+		$parent_product->save();
 	}
 }
 
@@ -476,6 +626,89 @@ function add_image_to_product()
 			}
 		}
 	}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	function import_categories($xml)
+	{
+		if (!isset($xml->Классификатор->Группы))
+			return;
+		parse_groups($xml->Классификатор->Группы);
+	}
+
+	function parse_groups($groups, $parent = 0)
+	{
+		foreach ($groups->Группа as $group) {
+			$id = (string) $group->Ид;
+			$name = (string) $group->Наименование;
+
+			// пропускаем удалённые
+			if ((string) $group->ПометкаУдаления === 'true') {
+				continue;
+			}
+
+			$slug = translit($name);
+
+			// ищем по 1С ID
+			$existing = get_terms([
+				'taxonomy' => 'product_cat',
+				'hide_empty' => false,
+				'meta_query' => [
+					[
+						'key' => '1c_id',
+						'value' => $id
+					]
+				]
+			]);
+
+			if (!empty($existing)) {
+				$term_id = $existing[0]->term_id;
+			} else {
+				$result = wp_insert_term($name, 'product_cat', [
+					'slug' => $slug,
+					'parent' => $parent
+				]);
+
+				if (is_wp_error($result))
+					continue;
+
+				$term_id = $result['term_id'];
+
+				// сохраняем связь с 1С
+				update_term_meta($term_id, '1c_id', $id);
+			}
+
+			// рекурсия
+			if (isset($group->Группы)) {
+				parse_groups($group->Группы, $term_id);
+			}
+		}
+	}
+
+	$xml = simplexml_load_file('import.xml');
+
+	import_categories($xml);
 }
 
 add_action('init', function () {
@@ -483,14 +716,17 @@ add_action('init', function () {
 		return;
 	set_time_limit(0);
 
+	// categories();
 	// creat_product();
 	// creat_attrebutes();
-	// add_attrebut_on_product();
+	add_attrebut_on_product();
 	// creat_variation();
 	// add_terms();
 	// add_price();
 	// add_image_to_product();
 
-// ============================================================================================================================
+	// ============================================================================================================================
 // import_night
 // ============================================================================================================================
+
+});
