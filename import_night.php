@@ -62,6 +62,7 @@ echo "Готово!";
 
 
 
+
 // ============================================================================================================================
 // import_night
 // ============================================================================================================================
@@ -171,7 +172,7 @@ function categories()
 		}
 	}
 
-	$xml_file = __DIR__ . '/import___86e209bc-0e98-470e-948a-0e59edce081d.xml';
+	$xml_file = __DIR__ . '/import__86e209bc-0e98-470e-948a-0e59edce081d.xml';
 	$xml = simplexml_load_file($xml_file);
 
 	import_categories($xml);
@@ -208,7 +209,11 @@ function creat_product()
 			// ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 			$has_variations = false;
 			foreach ($offers->ПакетПредложений->Предложения->Предложение as $offer) {
-				if (strpos((string) $offer->Ид, $sku . '#') === 0) {
+
+
+				$offer_id = (string) $offer->Ид;
+
+				if (str_starts_with($offer_id, $sku . '#')) {
 					$has_variations = true;
 					break;
 				}
@@ -298,6 +303,91 @@ function creat_attrebutes()
 			}
 		}
 	}
+
+
+	// ==================== Dop Attrebuts ===========================================
+
+	$dop_catalog_file = __DIR__ . '/import__e42c06a9-7376-4dda-93f4-e54851e35e01.xml';
+	$catalog = simplexml_load_file($dop_catalog_file);
+
+
+	foreach ($catalog->Каталог->Товары->Товар as $cat_item) {
+		foreach ($cat_item->ЗначенияСвойств->ЗначенияСвойства as $zn_svo_item) {
+			$dop_offers_file = __DIR__ . '/import___4583af59-8eaf-4e62-b5e5-2baee3f5e61f.xml';
+			$dop_offers = simplexml_load_file($dop_offers_file);
+
+			$id = ((string) $zn_svo_item->Ид);
+			$value = ((string) $zn_svo_item->Значение);
+
+			if (!$value)
+				continue;
+
+			foreach ($dop_offers->Классификатор->Свойства->Свойство as $svo_item) {
+
+				if (((string) $svo_item->Ид) !== $id)
+					continue;
+
+				$name = trim((string) $svo_item->Наименование, "_ ");
+
+				if (((string) $svo_item->ТипЗначений) === 'Число') {
+
+					$taxonomy = 'pa_' . translit($name);
+
+					// создаём атрибут если нет
+					if (!taxonomy_exists($taxonomy)) {
+						$attribute_id = wc_create_attribute([
+							'name' => $name,
+							'slug' => translit($name),
+							'type' => 'text',
+							'order_by' => 'menu_order',
+							'has_archives' => false,
+						]);
+						register_taxonomy($taxonomy, 'product', ['hierarchical' => true]);
+					}
+
+					// Создаём термин для атрибута
+					if (!term_exists($value, $taxonomy)) {
+						wp_insert_term($value, $taxonomy, ['slug' => translit($value)]);
+					}
+
+				} elseif (((string) $svo_item->ТипЗначений) === 'Справочник') {
+
+					foreach ($svo_item->ВариантыЗначений->Справочник as $sprav_item) {
+
+						if (((string) $sprav_item->ИдЗначения) === $value) {
+							$value = (string) $sprav_item->Значение;
+						} else {
+							continue;
+						}
+
+						$taxonomy = 'pa_' . translit($name);
+
+						// создаём атрибут если нет
+						if (!taxonomy_exists($taxonomy)) {
+							$attribute_id = wc_create_attribute([
+								'name' => $name,
+								'slug' => translit($name),
+								'type' => 'text',
+								'order_by' => 'menu_order',
+								'has_archives' => false,
+							]);
+							register_taxonomy($taxonomy, 'product', ['hierarchical' => true]);
+						}
+
+						// Создаём термин для атрибута
+						if (!term_exists($value, $taxonomy)) {
+							wp_insert_term($value, $taxonomy, ['slug' => translit($value)]);
+						}
+
+					}
+				} else {
+					continue;
+				}
+
+			}
+		}
+	}
+
 }
 
 
@@ -309,43 +399,10 @@ function add_attrebut_on_product()
 	$offers_file = __DIR__ . '/offers__8ee528fc-aee1-4912-9105-6ccf7f67d014.xml';
 	$offers = simplexml_load_file($offers_file);
 
-	
-	
-	$att = [];
-	
-	foreach ($offers->ПакетПредложений->Предложения->Предложение as $offer) {
 
-		$full_id = (string) $offer->Ид;
-		$parts = explode('#', $full_id);
 
-		if (count($parts) < 2)
-			continue;
 
-		$product_sku = $parts[0];
 
-		$product_id = wc_get_product_id_by_sku($product_sku);
-		if (!$product_id)
-			continue;
-
-		$product = wc_get_product($product_id);
-
-		$att_term = [];
-
-		foreach ($offer->ХарактеристикиТовара->ХарактеристикаТовара as $attr) {
-			// $name = ((string) $attr->Наименование);
-			$name = trim((string) $attr->Наименование, "_ ");
-			$value = ((string) $attr->Значение);
-
-			if (!$value)
-				continue;
-
-			$taxonomy = 'pa_' . translit($name);
-
-			$term = get_term_by('name', $value, $taxonomy);
-
-			$att[$product_sku][$taxonomy][] = $term->name;
-		}
-	}
 
 	foreach ($offers->ПакетПредложений->Предложения->Предложение as $offer) {
 
@@ -376,17 +433,26 @@ function add_attrebut_on_product()
 			$taxonomy = 'pa_' . translit($name);
 
 			$term = get_term_by('name', $value, $taxonomy);
+
+			$existing_attrs = $product->get_attributes();
+			$existing_options = [];
+
+			if (isset($existing_attrs[$taxonomy])) {
+				$existing_options = $existing_attrs[$taxonomy]->get_options();
+				$existing_options[] = $term->name;
+			} else {
+				$existing_options[] = $term->name;
+			}
+
 
 			$attrr = new WC_Product_Attribute();
 			$attrr->set_id(wc_attribute_taxonomy_id_by_name($taxonomy));
 			$attrr->set_name($taxonomy);
-			$attrr->set_options(array_unique($att[$product_sku][$taxonomy]));
+			// $attrr->set_options(array_unique($att[$product_sku][$taxonomy]));
+			$attrr->set_options($existing_options);
 			$attrr->set_visible(true);
 			$attrr->set_variation(true);
 
-
-			// Получаем текущие атрибуты
-			$existing_attrs = $product->get_attributes();
 			// Добавляем к существующим
 			$existing_attrs[$taxonomy] = $attrr;
 
@@ -400,11 +466,143 @@ function add_attrebut_on_product()
 
 
 
+
+
+
+
+function add_glob_attrebut_on_product()
+{
+	$dop_catalog_file = __DIR__ . '/import__e42c06a9-7376-4dda-93f4-e54851e35e01.xml';
+	$catalog = simplexml_load_file($dop_catalog_file);
+
+	foreach ($catalog->Каталог->Товары->Товар as $cat_item) {
+
+		$cat_sku = (string) $cat_item->Ид;
+
+		$product_id = wc_get_product_id_by_sku($cat_sku);
+		if (!$product_id)
+			continue;
+
+		$product = wc_get_product($product_id);
+
+
+		foreach ($cat_item->ЗначенияСвойств->ЗначенияСвойства as $zn_svo_item) {
+			$dop_offers_file = __DIR__ . '/import___4583af59-8eaf-4e62-b5e5-2baee3f5e61f.xml';
+			$dop_offers = simplexml_load_file($dop_offers_file);
+
+			$id = ((string) $zn_svo_item->Ид);
+			$value = ((string) $zn_svo_item->Значение);
+
+			if (!$value)
+				continue;
+
+			foreach ($dop_offers->Классификатор->Свойства->Свойство as $svo_item) {
+
+				if (((string) $svo_item->Ид) !== $id)
+					continue;
+
+				$name = trim((string) $svo_item->Наименование, "_ ");
+
+				if (((string) $svo_item->ТипЗначений) === 'Число') {
+
+					$taxonomy = 'pa_' . translit($name);
+					$term = get_term_by('name', $value, $taxonomy);
+
+
+					$existing_attrs = $product->get_attributes();
+					$existing_options = [];
+
+					if (isset($existing_attrs[$taxonomy])) {
+						$existing_options = $existing_attrs[$taxonomy]->get_options();
+						$existing_options[] = $term->name;
+					} else {
+						$existing_options[] = $term->name;
+					}
+
+					$attrr = new WC_Product_Attribute();
+					$attrr->set_id(wc_attribute_taxonomy_id_by_name($taxonomy));
+					$attrr->set_name($taxonomy);
+					// $attrr->set_options(array_unique($att[$product_sku][$taxonomy]));
+					$attrr->set_options($existing_options);
+					$attrr->set_visible(true);
+					$attrr->set_variation(true);
+
+					// Добавляем к существующим
+					$existing_attrs[$taxonomy] = $attrr;
+
+					$product->set_attributes($existing_attrs);
+					$product->save();
+
+
+
+				} elseif (((string) $svo_item->ТипЗначений) === 'Справочник') {
+					foreach ($svo_item->ВариантыЗначений->Справочник as $sprav_item) {
+
+						if (((string) $sprav_item->ИдЗначения) === $value) {
+							$value = (string) $sprav_item->Значение;
+						} else {
+							continue;
+						}
+
+						$taxonomy = 'pa_' . translit($name);
+						$term = get_term_by('name', $value, $taxonomy);
+
+
+						$existing_attrs = $product->get_attributes();
+						$existing_options = [];
+
+						if (isset($existing_attrs[$taxonomy])) {
+							$existing_options = $existing_attrs[$taxonomy]->get_options();
+							$existing_options[] = $term->name;
+						} else {
+							$existing_options[] = $term->name;
+						}
+
+						$attrr = new WC_Product_Attribute();
+						$attrr->set_id(wc_attribute_taxonomy_id_by_name($taxonomy));
+						$attrr->set_name($taxonomy);
+						// $attrr->set_options(array_unique($att[$product_sku][$taxonomy]));
+						$attrr->set_options($existing_options);
+						$attrr->set_visible(true);
+						$attrr->set_variation(true);
+
+						// Добавляем к существующим
+						$existing_attrs[$taxonomy] = $attrr;
+
+						$product->set_attributes($existing_attrs);
+						$product->save();
+
+
+
+					}
+				} else {
+					continue;
+				}
+
+			}
+		}
+	}
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
 function creat_variation()
 {
 	$offers_file = __DIR__ . '/offers__8ee528fc-aee1-4912-9105-6ccf7f67d014.xml';
 	$offers = simplexml_load_file($offers_file);
 
+	// $count = 0;
 	foreach ($offers->ПакетПредложений->Предложения->Предложение as $offer) {
 
 		$full_id = (string) $offer->Ид;
@@ -414,7 +612,7 @@ function creat_variation()
 			continue;
 
 		$product_sku = $parts[0];
-		$variation_sku = $parts[1];
+		$variation_sku = $full_id;
 
 		$product_id = wc_get_product_id_by_sku($product_sku);
 		if (!$product_id)
@@ -438,12 +636,12 @@ function creat_variation()
 
 		foreach ($offer->ХарактеристикиТовара->ХарактеристикаТовара as $attr) {
 
-			// $name = ((string) $attr->Наименование);
 			$name = trim((string) $attr->Наименование, "_ ");
 			$value = ((string) $attr->Значение);
 
-			if (!$value)
+			if (!$value) {
 				continue;
+			}
 
 			$taxonomy = 'pa_' . translit($name);
 
@@ -549,7 +747,8 @@ function add_price()
 		if (count($parts) < 2)
 			continue;
 
-		$variation_sku = $parts[1];
+		// $variation_sku = $parts[1];
+		$variation_sku = $full_id;
 
 		$variation_id = wc_get_product_id_by_sku($variation_sku);
 
@@ -574,6 +773,135 @@ function add_price()
 
 
 
+// function add_image_to_product()
+// {
+// 	require_once(ABSPATH . 'wp-admin/includes/media.php');
+// 	require_once(ABSPATH . 'wp-admin/includes/file.php');
+// 	require_once(ABSPATH . 'wp-admin/includes/image.php');
+
+// 	$offers_file = __DIR__ . '/offers__8ee528fc-aee1-4912-9105-6ccf7f67d014.xml';
+// 	$offers = simplexml_load_file($offers_file);
+
+// 	foreach ($offers->ПакетПредложений->Предложения->Предложение as $offer) {
+
+// 		$full_id = (string) $offer->Ид;
+// 		$parts = explode('#', $full_id);
+
+// 		if (count($parts) < 2)
+// 			continue;
+
+// 		$product_sku = $parts[0];
+
+// 		$product_id = wc_get_product_id_by_sku($product_sku);
+// 		if (!$product_id)
+// 			continue;
+
+// 		$gallery_ids = [];
+
+// 		foreach ($offer->Картинка as $item_img) {
+
+// 			if (!$item_img)
+// 				continue;
+
+// 			$image_url = get_template_directory_uri() . '/' . $item_img;
+
+// 			$image_id = media_sideload_image($image_url, $product_id, null, 'id');
+
+// 			if (!is_wp_error($image_id)) {
+// 				$gallery_ids[] = $image_id;
+
+// 				set_post_thumbnail($product_id, $image_id);
+// 			}
+// 		}
+
+// 		if (!empty($gallery_ids)) {
+// 			// первая картинка как миниатюра
+// 			set_post_thumbnail($product_id, $gallery_ids[0]);
+
+// 			// остальные картинки в галерею
+// 			if (count($gallery_ids) > 1) {
+// 				$gallery_ids_string = implode(',', array_slice($gallery_ids, 1));
+// 				update_post_meta($product_id, '_product_image_gallery', $gallery_ids_string);
+// 			}
+// 		}
+// 	}
+// }
+
+// function add_image_to_product()
+// {
+//     require_once(ABSPATH . 'wp-admin/includes/media.php');
+//     require_once(ABSPATH . 'wp-admin/includes/file.php');
+//     require_once(ABSPATH . 'wp-admin/includes/image.php');
+
+//     $offers_file = __DIR__ . '/offers__8ee528fc-aee1-4912-9105-6ccf7f67d014.xml';
+//     $offers = simplexml_load_file($offers_file);
+
+// 		$count = 0;
+
+//     foreach ($offers->ПакетПредложений->Предложения->Предложение as $offer) {
+
+//         $full_id = (string) $offer->Ид;
+//         $parts = explode('#', $full_id, 2);
+
+//         if (count($parts) < 2) continue;
+
+//         $product_sku   = trim($parts[0]);
+//         $variation_sku = $full_id;
+
+//         $product_id   = wc_get_product_id_by_sku($product_sku);
+//         $variation_id = wc_get_product_id_by_sku($variation_sku);
+
+//         if (!$product_id || !$variation_id) continue;
+
+//         $gallery_ids = [];
+
+//         foreach ($offer->Картинка as $item_img) {
+
+//             if (!$item_img) continue;
+
+//             $image_url = get_template_directory_uri() . '/' . $item_img;
+
+//             $image_id = media_sideload_image($image_url, $variation_id, null, 'id');
+
+//             if (!is_wp_error($image_id)) {
+//                 $gallery_ids[] = $image_id;
+//             }
+//         }
+
+//         if (empty($gallery_ids)) continue;
+
+//         // ✅ 1. Первая картинка → вариации
+//         set_post_thumbnail($variation_id, $gallery_ids[0]);
+
+//         // ✅ 2. Остальные → галерея родителя
+//         if (count($gallery_ids) > 1) {
+
+//             $parent_gallery = get_post_meta($product_id, '_product_image_gallery', true);
+
+//             $parent_gallery_ids = $parent_gallery
+//                 ? explode(',', $parent_gallery)
+//                 : [];
+
+//             // добавляем новые (без дублей)
+//             $new_gallery = array_unique(array_merge(
+//                 $parent_gallery_ids,
+//                 array_slice($gallery_ids, 1)
+//             ));
+
+//             update_post_meta(
+//                 $product_id,
+//                 '_product_image_gallery',
+//                 implode(',', $new_gallery)
+//             );
+//         }
+// 				$count++;
+// 				if ($count === 20) {
+// 					break;
+// 				}
+//     }
+// }
+
+
 function add_image_to_product()
 {
 	require_once(ABSPATH . 'wp-admin/includes/media.php');
@@ -583,21 +911,48 @@ function add_image_to_product()
 	$offers_file = __DIR__ . '/offers__8ee528fc-aee1-4912-9105-6ccf7f67d014.xml';
 	$offers = simplexml_load_file($offers_file);
 
+	$count_cheak = 0;
+	$count = 0;
+	$cheack = 'd53abef6-e974-11ed-b9fa-00d861dc11fd#33bbba7f-f30f-11ed-ba02-00090faa0001';
+
+	// ac425744-eb2e-11ed-b9fc-00d861dc11fd#3cec9c1c-110d-11ee-ba1e-00d861dc11fd
+	// 240  
+
+	// $cheack = '';
+	$flak = 0;
+
 	foreach ($offers->ПакетПредложений->Предложения->Предложение as $offer) {
 
 		$full_id = (string) $offer->Ид;
-		$parts = explode('#', $full_id);
+		$parts = explode('#', $full_id, 2);
 
 		if (count($parts) < 2)
 			continue;
 
-		$product_sku = $parts[0];
+		$product_sku = trim($parts[0]);
+		$variation_sku = $full_id;
+
+		if ($cheack !== '') {
+			if ($cheack === $variation_sku) {
+				$flak = 1;
+				$count_cheak++;
+				continue;
+			}
+
+			if ($flak === 0) {
+				$count_cheak++;
+				continue;
+			}
+			$count_cheak++;
+		}
 
 		$product_id = wc_get_product_id_by_sku($product_sku);
-		if (!$product_id)
+		$variation_id = wc_get_product_id_by_sku($variation_sku);
+
+		if (!$product_id || !$variation_id)
 			continue;
 
-		$gallery_ids = [];
+		$image_ids = [];
 
 		foreach ($offer->Картинка as $item_img) {
 
@@ -609,23 +964,104 @@ function add_image_to_product()
 			$image_id = media_sideload_image($image_url, $product_id, null, 'id');
 
 			if (!is_wp_error($image_id)) {
-				$gallery_ids[] = $image_id;
-
-				set_post_thumbnail($product_id, $image_id);
+				$image_ids[] = $image_id;
 			}
 		}
 
-		if (!empty($gallery_ids)) {
-			// первая картинка как миниатюра
-			set_post_thumbnail($product_id, $gallery_ids[0]);
+		if (empty($image_ids))
+			continue;
 
-			// остальные картинки в галерею
-			if (count($gallery_ids) > 1) {
-				$gallery_ids_string = implode(',', array_slice($gallery_ids, 1));
-				update_post_meta($product_id, '_product_image_gallery', $gallery_ids_string);
+
+
+		$main_image_id = $image_ids[0];
+
+		set_post_thumbnail($product_id, $main_image_id);
+
+		set_post_thumbnail($variation_id, $main_image_id);
+
+		$parent_gallery = get_post_meta($product_id, '_product_image_gallery', true);
+		$parent_gallery_ids = $parent_gallery ? explode(',', $parent_gallery) : [];
+
+		if (!in_array($main_image_id, $parent_gallery_ids)) {
+			$parent_gallery_ids[] = $main_image_id;
+		}
+
+
+
+		$rest_images = array_slice($image_ids, 1);
+
+		foreach ($rest_images as $img_id) {
+			if (!in_array($img_id, $parent_gallery_ids)) {
+				$parent_gallery_ids[] = $img_id;
 			}
+		}
+
+		update_post_meta(
+			$product_id,
+			'_product_image_gallery',
+			implode(',', $parent_gallery_ids)
+		);
+
+		$count++;
+		if ($count === 30) {
+			echo $variation_sku;
+			echo '<br>';
+			echo $count_cheak;
+			break;
 		}
 	}
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+add_action('init', function () {
+	if (!isset($_GET['import_1c_full']) || $_GET['import_1c_full'] !== 'norm408')
+		return;
+	set_time_limit(0);
+
+	// categories();
+	// creat_product();
+	// creat_attrebutes();
+	// add_attrebut_on_product();
+	// add_glob_attrebut_on_product();
+	// creat_variation();
+	// add_terms();
+	// add_price();
+	add_image_to_product();
+
+	// ============================================================================================================================
+// import_night
+// ============================================================================================================================
+
+});
+
 
 
 
